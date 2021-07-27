@@ -2,6 +2,7 @@ package sample1
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -52,14 +53,73 @@ func (c *TransparentCache) GetPriceFor(itemCode string) (float64, error) {
 // GetPricesFor gets the prices for several items at once, some might be found in the cache, others might not
 // If any of the operations returns an error, it should return an error as well
 func (c *TransparentCache) GetPricesFor(itemCodes ...string) ([]float64, error) {
-	results := []float64{}
-	for _, itemCode := range itemCodes {
-		// TODO: parallelize this, it can be optimized to not make the calls to the external service sequentially
-		price, err := c.GetPriceFor(itemCode)
-		if err != nil {
-			return []float64{}, err
-		}
-		results = append(results, price)
+	// req represents a price request
+	type req struct {
+		pos      int // position of the itemCode in itemCodes
+		itemCode string
 	}
-	return results, nil
+	// res represents a price result
+	type res struct {
+		pos   int // position of the itemCode in itemCodes
+		price float64
+	}
+
+	// Separate channels for price requests, results and the error
+
+	reqChan := make(chan req, len(itemCodes))
+	resChan := make(chan res, len(itemCodes))
+	errChan := make(chan error, 1)
+
+	// Use a wait group to coordinate workers still running
+
+	var wg sync.WaitGroup
+	for i := 0; i < runtime.NumCPU(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Wait for next request, get the price and notify on resChan or errChan
+
+			for req := range reqChan {
+				price, err := c.GetPriceFor(req.itemCode)
+				if err != nil {
+					errChan <- err
+					return
+				}
+				resChan <- res{req.pos, price}
+			}
+		}()
+	}
+
+	// Send each item code to workers using the reqChan, then close it.
+
+	for i, itemCode := range itemCodes {
+		reqChan <- req{i, itemCode}
+	}
+	close(reqChan)
+
+	// Use another goroutine to aggregate the results inside a single slice
+
+	resultsChan := make(chan []float64)
+	go func() {
+		defer close(resultsChan)
+
+		results := make([]float64, len(itemCodes))
+		for price := range resChan {
+			results[price.pos] = price.price
+		}
+		resultsChan <- results
+	}()
+
+	wg.Wait()
+	close(resChan)
+
+	// Wait for either, the results slice or the first error encountered by workers
+
+	select {
+	case results := <-resultsChan:
+		return results, nil
+	case err := <-errChan:
+		return []float64{}, err
+	}
 }
