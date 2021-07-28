@@ -105,8 +105,8 @@ func (c *TransparentCache) GetPricesFor(itemCodes ...string) ([]float64, error) 
 		defer close(resultsChan)
 
 		results := make([]float64, len(itemCodes))
-		for price := range resChan {
-			results[price.pos] = price.price
+		for res := range resChan {
+			results[res.pos] = res.price
 		}
 		resultsChan <- results
 	}()
