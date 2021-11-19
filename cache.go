@@ -5,6 +5,8 @@ import (
 	"runtime"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // PriceService is a service that we can use to get prices for the items
@@ -66,29 +68,23 @@ func (c *TransparentCache) GetPricesFor(itemCodes ...string) ([]float64, error) 
 
 	// Separate channels for price requests, results and the error
 
-	reqChan := make(chan req, len(itemCodes))
-	resChan := make(chan res, len(itemCodes))
-	errChan := make(chan error, 1)
+	reqChan := make(chan req, len(itemCodes)/runtime.NumCPU())
+	resChan := make(chan res, len(itemCodes)/runtime.NumCPU())
 
-	// Use a wait group to coordinate workers still running
+	// Use a wait group to coordinate workers running
 
-	var wg sync.WaitGroup
+	var wg errgroup.Group
 	for i := 0; i < runtime.NumCPU(); i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
-			// Wait for next request, get the price and notify on resChan or errChan
-
+		wg.Go(func() error {
 			for req := range reqChan {
 				price, err := c.GetPriceFor(req.itemCode)
 				if err != nil {
-					errChan <- err
-					return
+					return err
 				}
 				resChan <- res{req.pos, price}
 			}
-		}()
+			return nil
+		})
 	}
 
 	// Send each item code to workers using the reqChan, then close it.
@@ -111,15 +107,10 @@ func (c *TransparentCache) GetPricesFor(itemCodes ...string) ([]float64, error) 
 		resultsChan <- results
 	}()
 
-	wg.Wait()
+	err := wg.Wait()
 	close(resChan)
-
-	// Wait for either, the results slice or the first error encountered by workers
-
-	select {
-	case results := <-resultsChan:
-		return results, nil
-	case err := <-errChan:
+	if err != nil {
 		return []float64{}, err
 	}
+	return <-resultsChan, nil
 }
